@@ -10,6 +10,62 @@
 - A personal Slack workspace (Free Edition also works!)
 - A custom Slack bot (files in **`manual/`** explains detailed guidelines to make this bot) 
 
+## Repository Structure
+
+```
+claude-code-slack/
+├── assets/
+│   └── overview.png                  # Architecture diagram used in the README
+├── manual/
+│   ├── claude-slack-manual-EN.pptx   # Step-by-step setup guide (English)
+│   └── claude-slack-manual-KO.pptx   # Step-by-step setup guide (Korean)
+├── src/
+│   ├── .env                          # Your tokens (see security note below)
+│   ├── index.js                      # Main bot code — all Slack handlers, tmux control, API calls
+│   └── package.json                  # npm dependencies and start script
+├── LICENSE                           # MIT license
+└── README.md                         # This file
+```
+
+### What each directory contains
+
+#### `src/`
+The runnable bot. Everything needed to start the bot lives here.
+
+- **`index.js`** — The entire bot in a single Node.js file. Handles the `/claude`, `/tmux-connect`, `/tmux`, `/tmux-status`, and `/tmux-disconnect` slash commands, routes thread replies, polls the tmux pane every 3 seconds for permission prompts, and makes streaming calls to the Anthropic API.
+- **`package.json`** — Declares three runtime dependencies (`@slack/bolt`, `@anthropic-ai/sdk`, `dotenv`) and the `start` script. Run `npm install` inside `src/` before first use.
+- **`.env`** — Holds the three secret tokens (`SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, `ANTHROPIC_API_KEY`) that the bot reads on startup.
+
+#### `manual/`
+Visual, slide-by-slide setup walkthroughs. Identical content in two languages.
+
+- **`claude-slack-manual-EN.pptx`** — English version. 19 slides covering Slack app creation, token generation, server installation, running the bot, and feature usage.
+- **`claude-slack-manual-KO.pptx`** — Korean version of the same manual.
+
+#### `assets/`
+Images referenced by `README.md`.
+
+- **`overview.png`** — The architecture diagram shown at the top of the README.
+
+## Running from this repo
+
+```bash
+# 1. Clone
+git clone https://github.com/jwyang21/claude-code-slack.git
+cd claude-code-slack/src
+
+# 2. Install dependencies
+npm install
+
+# 3. Fill in .env with your three tokens
+#    (SLACK_BOT_TOKEN, SLACK_APP_TOKEN, ANTHROPIC_API_KEY)
+
+# 4. Run
+npm start
+```
+
+See `manual/claude-slack-manual-{EN,KO}.pptx` for the full Slack app setup walkthrough.
+
 ## Detailed Explanation
 ### Two Ways the Bot Talks to Claude
 
