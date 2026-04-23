@@ -66,7 +66,7 @@ npm start
 See `manual/claude-slack-manual-{EN,KO}.pptx` for the full Slack app setup walkthrough.
 
 
-## Security Note
+## ‼️ Security Note
 - Never commit your `.env` file — it contains sensitive tokens
 - `.gitignore` is preconfigured to exclude `.env` and `node_modules/`
 
