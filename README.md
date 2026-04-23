@@ -46,7 +46,7 @@ Images referenced by `README.md`.
 
 - **`overview.png`** — The architecture diagram.
 
-## Running from this repo
+## 🔧 Running from this repo
 
 ```bash
 # 1. Clone
