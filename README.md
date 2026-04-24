@@ -18,7 +18,7 @@ claude-code-slack/
 │   └── package.json                  # npm dependencies and start script
 ├── manual/
 │   ├── claude-slack-manual-EN.pptx   # Step-by-step setup guide (English)
-│   └── claude-slack-manual-KO.pptx   # Step-by-step setup guide (Korean)
+│   ├── claude-slack-manual-KO.pptx   # Step-by-step setup guide (Korean)
 │   └── index_commented.js            # Main bot code (src/index.js) with comments. Created by Claude.
 ├── assets/
 │   └── overview.png                  # Architecture diagram used in the README
