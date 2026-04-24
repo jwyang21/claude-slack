@@ -38,6 +38,35 @@
 //                            buttons to Slack so the user can approve from
 //                            anywhere.
 //
+//  FALSE-ALARM HARDENING (current revision)
+//  ----------------------------------------
+//  Several improvements over the original detection logic to reduce spurious
+//  permission alerts. See each spot in the code for full rationale.
+//
+//    1. STRONG / WEAK pattern split — permission regexes are partitioned into
+//       two categories. STRONG patterns (like "Do you want to proceed?") can
+//       trigger detection on their own. WEAK patterns (like "Esc to cancel",
+//       which also appears in the "Thinking…" footer) are kept for reference
+//       but currently ignored by the detector.
+//
+//    2. Three overly broad patterns REMOVED outright: /confirm.*\?/i,
+//       /Approve\?/i, /Allow Claude to/i. Each used to match dozens of non-
+//       permission strings ("이거 confirm 해야 돼?", GitHub PR text, meta
+//       conversations about Claude's own perms).
+//
+//    3. Yes/No number-list pattern TIGHTENED from DOTALL "anywhere in the
+//       buffer" to "1." and "2." on consecutive lines. Stops false matches
+//       on Claude's prose answers that contain Pros/Cons style numbered lists.
+//
+//    4. Input echo suppression: after tmuxSend() pushes user text into the
+//       pane, permission detection is paused for a few seconds. Prevents the
+//       user's own echoed input (e.g. a pasted code snippet containing
+//       "[Y/n]") from being misread as a real permission prompt.
+//
+//    5. ANSI strip regex extended to include '?' in the character class —
+//       catches CSI sequences like "\x1b[?25l" (hide cursor) and
+//       "\x1b[?1049h" (alternate screen) that the old regex missed.
+//
 //  ONE-MINUTE JAVASCRIPT REFRESHER
 //  --------------------------------
 //  If you don't know JavaScript, here's the minimum you need:
@@ -133,33 +162,85 @@ let lastTmuxOutput     = "";     // tmux screen content from the previous poll
 let awaitingPermission = false;  // true while a permission prompt is waiting
                                  // for a user response.
 
+// Timestamp (ms since epoch) of the last time the user sent text into tmux
+// via Slack. For the next few seconds after this, the background polling
+// loop will SKIP permission detection.
+//
+// Why: when the user types something in Slack (e.g. pastes a code snippet,
+// asks "confirm this change?" as plain text), that text gets echoed on the
+// tmux screen by tmuxSend(). Without suppression, those echoed characters
+// could match a permission pattern and trigger a false alarm. We wait a
+// few seconds for the echo to scroll past before resuming detection.
+let lastUserInputAt = 0;
+const INPUT_ECHO_SUPPRESS_MS = 4000;
+
 
 // ─── 6. PATTERNS THAT INDICATE A PERMISSION PROMPT ──────────────────────────
-// Each entry is a regular expression. If ANY of these match the tmux screen
-// text, we treat it as Claude Code asking for approval and post Yes/No
-// buttons in Slack.
-const PERMISSION_PATTERNS = [
+//
+// We split the patterns into two categories to avoid false alarms.
+//
+// STRONG_PATTERNS: a single match is enough to trigger detection. Each of
+//   these is specific enough that it rarely appears outside a real permission
+//   prompt. For example, "Do you want to proceed?" is almost exclusively
+//   produced by claude-code's approval dialog (plus some CLI tools like apt).
+//
+// WEAK_PATTERNS: a single match is NOT enough to trigger detection by itself.
+//   These appear in claude-code's TUI "chrome" even when no permission is
+//   being requested — e.g. "Esc to cancel" also shows up in the "Thinking…"
+//   footer while the model is generating a response. We keep this array
+//   defined for documentation / future extension, but detect() currently
+//   ignores it. If a future change needs to require a weak + strong
+//   combination, the WEAK_PATTERNS list is ready to use.
+//
+// THREE PATTERNS WERE REMOVED FROM THE EARLIER VERSION because they caused
+// constant false alarms:
+//   /confirm.*\?/i      — matched "이거 confirm 해야 돼?", "confirm format?",
+//                         code comments, anything combining the word with "?"
+//   /Approve\?/i        — matched GitHub/GitLab review text, email digests
+//   /Allow Claude to/i  — matched meta-discussions about Claude's own
+//                         permissions ("should we allow Claude to auto-commit?")
+// These three removals single-handedly eliminated most of the noise.
+//
+// ONE PATTERN WAS TIGHTENED:
+//   Old: /1\.\s*Yes.*2\.\s*No/is
+//   New: /1\.\s*Yes[^\n]*\n\s*2\.\s*No/i
+//   The old version used the DOTALL flag ('s'), which means "1. Yes" and
+//   "2. No" could be thousands of characters apart. Claude's prose answers
+//   often include numbered lists like "1. Yes, this approach... (long prose)
+//   2. No significant drawbacks...", which triggered false alarms. The new
+//   regex requires the two items on CONSECUTIVE non-empty lines — which is
+//   how the real TUI renders them, but rarely how prose lists are written.
+
+const STRONG_PATTERNS = [
   /Do you want to proceed\?/i,
   /This command requires approval/i,
   /Allow this action\?/i,
   /\(y\/n\)/i,
   /\[y\/N\]/i,
   /\[Y\/n\]/i,
-  /1\.\s*Yes.*2\.\s*No/is,
+  /1\.\s*Yes[^\n]*\n\s*2\.\s*No/i,   // consecutive-line Yes/No list
   /Yes.*No.*\(enter number\)/is,
-  /Allow Claude to/i,
-  /Approve\?/i,
-  /confirm.*\?/i,
-  /Esc to cancel/i,
-  /Tab to amend/i,
-  /[❯›]\s*1\./,
+  /[❯›]\s*1\.\s*\w/,                 // selector cursor + "1." + a word char
 ];
 
-// Returns true if `output` (the tmux screen text) contains any permission pattern.
-//   arr.some(callback) → true if callback returns true for at least one element.
-//   regex.test(str)    → true if `regex` matches anywhere in `str`.
+// Weak patterns: kept for reference / future combining logic, but not
+// enough to trigger detection on their own.
+const WEAK_PATTERNS = [
+  /Esc to cancel/i,
+  /Tab to amend/i,
+];
+
+// Returns true iff the tmux screen text should be treated as a permission
+// prompt. Currently this is just "any strong pattern matches". We intentionally
+// ignore weak-only matches because they're dominated by TUI chrome noise.
+//
+//   arr.some(callback) → true if callback returns true for at least one element
+//   regex.test(str)    → true if `regex` matches anywhere in `str`
 function detectPermissionRequest(output) {
-  return PERMISSION_PATTERNS.some(p => p.test(output));
+  const strongHit = STRONG_PATTERNS.some(p => p.test(output));
+  if (strongHit) return true;
+  // A weak-only match is NOT a real permission request.
+  return false;
 }
 
 
@@ -290,7 +371,7 @@ async function startTmuxPolling(client) {
     // Strip ANSI escape codes (the invisible color/cursor control sequences
     // terminals use). We want clean text for regex pattern matching.
     const stripped = raw
-      .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "")  // CSI sequences: \x1b[...m
+      .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "")  // CSI sequences: \x1b[...m
       .replace(/\x1b\][^\x07]*\x07/g, "");    // OSC sequences: \x1b]...BEL
     const output = stripped.trim().slice(-8000);   // Keep last 8 KB.
 
@@ -317,8 +398,22 @@ async function startTmuxPolling(client) {
     if (output === lastTmuxOutput) continue;
     lastTmuxOutput = output;
 
+    // ── ECHO-SUPPRESSION GUARD ────────────────────────────────────────────
+    // If the user just sent text into tmux via Slack within the last few
+    // seconds, skip permission detection. The user's text is briefly echoed
+    // on the tmux screen and could otherwise trigger a false alarm — e.g.
+    // if they paste a code snippet containing "[Y/n]" or "Do you want to
+    // proceed?", those characters would appear in the capture and match
+    // the strong patterns. Waiting a few seconds lets the echo scroll past.
+    const sinceUserInput = Date.now() - lastUserInputAt;
+    const echoSuppress = sinceUserInput < INPUT_ECHO_SUPPRESS_MS;
+
     // Detect a brand-new permission request and notify Slack.
-    if (!awaitingPermission && detectPermissionRequest(output)) {
+    // Three conditions must all hold:
+    //   - we're not already waiting for a response to a prior prompt
+    //   - we're not in the echo-suppression window
+    //   - the screen actually contains a permission pattern
+    if (!awaitingPermission && !echoSuppress && detectPermissionRequest(output)) {
       awaitingPermission = true;
       awaitingPermissionSince = Date.now();
 
@@ -432,7 +527,7 @@ app.command("/tmux-connect", async ({ command, ack, client }) => {
   // Post a one-time snapshot of the current pane so the user sees what's running.
   try {
     const raw = tmuxCapture();
-    const stripped = raw.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "").replace(/\x1b\][^\x07]*\x07/g, "");
+    const stripped = raw.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "").replace(/\x1b\][^\x07]*\x07/g, "");
     const output = stripped.trim().slice(-2800);
     await client.chat.postMessage({
       channel: command.channel_id,
@@ -461,7 +556,7 @@ app.command("/tmux-status", async ({ command, ack, client }) => {
   }
   try {
     const raw = tmuxCapture();
-    const stripped = raw.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "").replace(/\x1b\][^\x07]*\x07/g, "");
+    const stripped = raw.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "").replace(/\x1b\][^\x07]*\x07/g, "");
     const output = stripped.trim().slice(-2800);
     await client.chat.postMessage({
       channel: command.channel_id,
@@ -808,6 +903,10 @@ function getTmuxTarget(sessionId) {
 //      chars like apostrophes or non-ASCII characters.
 //   2. Sleep 0.3s so Claude Code's TUI finishes absorbing the text.
 //   3. Send Enter as a separate key event so it's unambiguously "submit".
+//
+// After sending, we also record the current time in `lastUserInputAt` so
+// the polling loop knows to suppress permission detection for a few
+// seconds (see the echo-suppression guard in startTmuxPolling).
 function tmuxSend(text) {
   const target = getTmuxTarget(currentTmuxSession);
   // 1. Send the text as literal characters (-l ensures special chars like
@@ -821,18 +920,30 @@ function tmuxSend(text) {
   // 3. Now send Enter as a separate key event so Claude Code treats it
   //    unambiguously as "submit".
   execSync(`tmux send-keys -t ${target} Enter`);
+  // 4. Record input time so the polling loop can skip detection while the
+  //    user's text is still echoed on the tmux screen. Prevents e.g. user
+  //    pasting a code snippet with "[Y/n]" from firing a false alarm.
+  lastUserInputAt = Date.now();
 }
 
 // Grab the current tmux pane contents (including up to 1000 lines of
 // scrollback) as a plain string, with ANSI color codes stripped out.
 //   -p          : print output to stdout
 //   -S -1000    : include scrollback going back 1000 lines
+//
+// ANSI STRIPPING: the two .replace() calls remove terminal escape codes
+// so that pattern matching sees clean text. Note the character class
+// [0-9;?]* inside the first regex — the '?' is essential because some
+// common CSI sequences like "\x1b[?25l" (hide cursor) and "\x1b[?1049h"
+// (enter alternate screen) contain a '?' right after the '['. Earlier
+// versions used [0-9;]* (no '?'), which let those sequences pass through
+// unstripped and show up as raw bytes in the matched text.
 function tmuxCapture() {
   const raw = execSync(
     `tmux capture-pane -t ${getTmuxTarget(currentTmuxSession)} -p -S -1000`,
     { encoding: "utf-8" }
   );
-  return raw.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "").replace(/\x1b\][^\x07]*\x07/g, "");
+  return raw.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "").replace(/\x1b\][^\x07]*\x07/g, "");
 }
 
 
@@ -963,7 +1074,7 @@ app.message(async ({ message, client }) => {
     if (text.toLowerCase() === "tmux-status") {
       try {
         const raw = tmuxCapture();
-        const stripped = raw.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "").replace(/\x1b\][^\x07]*\x07/g, "");
+        const stripped = raw.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "").replace(/\x1b\][^\x07]*\x07/g, "");
         const output = stripped.trim().slice(-2800);
         await client.chat.postMessage({
           channel: message.channel,
@@ -989,7 +1100,7 @@ app.message(async ({ message, client }) => {
         const output = execSync(`tmux send-keys -t ${currentTmuxSession} '/status' Enter`, { encoding: "utf-8" });
         await new Promise(r => setTimeout(r, 2000));   // wait 2s for claude-code to render
         const raw = tmuxCapture();
-        const stripped = raw.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "").replace(/\x1b\][^\x07]*\x07/g, "");
+        const stripped = raw.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "").replace(/\x1b\][^\x07]*\x07/g, "");
         await client.chat.postMessage({
           channel: message.channel,
           thread_ts: tmuxStreamTs,
