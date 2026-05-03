@@ -71,7 +71,7 @@ See `manual/claude-slack-manual-{EN,KO}.pptx` for the full Slack app setup walkt
 
 ## ‼️ Security Note
 - Never commit your `.env` file — it contains sensitive tokens
-- `.gitignore` is preconfigured to exclude `.env` and `node_modules/`
+- `.gitignore` is preconfigured to exclude `src/.env` and `src/node_modules/`
 
 ---
 
