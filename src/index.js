@@ -561,15 +561,30 @@ function getTmuxTarget(sessionId) {
 
 function tmuxSend(text) {
   const target = getTmuxTarget(currentTmuxSession);
+  const isMultiline = text.includes('\n');
+
   // 1. Send the text as literal characters (-l ensures special chars like apostrophes,
   //    Korean, etc. are transmitted verbatim without tmux trying to interpret them).
   execSync(`tmux send-keys -t ${target} -l ${JSON.stringify(text)}`);
+
   // 2. Give Claude Code's TUI a moment to fully receive the text before we press Enter.
-  //    Without this pause, Enter can arrive mid-paste and the input gets stuck in the box.
-  execSync(`sleep 0.3`);
-  // 3. Now send Enter as a separate key event so Claude Code treats it as "submit".
+  //    Multiline text triggers claude-code's "paste" handling ([Pasted text #1 +N lines]),
+  //    which needs extra time to settle before Enter can submit.
+  execSync(`sleep ${isMultiline ? '0.8' : '0.3'}`);
+
+  // 3. Send Enter to submit.
   execSync(`tmux send-keys -t ${target} Enter`);
-  // 4. Record the time of this input so the polling loop can suppress permission
+
+  // 4. For multiline input, claude-code shows the pasted text in a collapsed
+  //    "[Pasted text #1]" UI. The first Enter often just confirms/closes the
+  //    paste UI rather than submitting. Send a second Enter after a short
+  //    pause to actually submit the message.
+  if (isMultiline) {
+    execSync(`sleep 0.3`);
+    execSync(`tmux send-keys -t ${target} Enter`);
+  }
+
+  // 5. Record the time of this input so the polling loop can suppress permission
   //    detection for a few seconds (prevents user text being flagged as a prompt).
   lastUserInputAt = Date.now();
 }

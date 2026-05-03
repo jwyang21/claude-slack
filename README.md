@@ -13,7 +13,6 @@
 ```
 claude-code-slack/
 ├── src/
-│   ├── .env                          # Your tokens (see security note below)
 │   ├── index.js                      # Main bot code — all Slack handlers, tmux control, API calls
 │   └── package.json                  # npm dependencies and start script
 ├── manual/
@@ -23,6 +22,7 @@ claude-code-slack/
 ├── assets/
 │   └── overview.png                  # Architecture diagram used in the README
 ├── .gitignore                        # Specifies files and directories to be ignored by Git
+├── .env                              # Your tokens (see security note below)
 ├── LICENSE                           # MIT license
 └── README.md                         # This file
 ```

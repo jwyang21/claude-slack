@@ -38,10 +38,11 @@
 //                            buttons to Slack so the user can approve from
 //                            anywhere.
 //
-//  FALSE-ALARM HARDENING (current revision)
-//  ----------------------------------------
-//  Several improvements over the original detection logic to reduce spurious
-//  permission alerts. See each spot in the code for full rationale.
+//  RELIABILITY IMPROVEMENTS (current revision)
+//  -------------------------------------------
+//  Several improvements over the original logic to reduce spurious permission
+//  alerts AND to make tmux input handling more robust. See each spot in the
+//  code for full rationale.
 //
 //    1. STRONG / WEAK pattern split — permission regexes are partitioned into
 //       two categories. STRONG patterns (like "Do you want to proceed?") can
@@ -66,6 +67,13 @@
 //    5. ANSI strip regex extended to include '?' in the character class —
 //       catches CSI sequences like "\x1b[?25l" (hide cursor) and
 //       "\x1b[?1049h" (alternate screen) that the old regex missed.
+//
+//    6. Multi-line input handling: when the user sends a message containing
+//       newlines, claude-code shows it as a "[Pasted text #1 +N lines]"
+//       collapsed UI. A single Enter only closes that placeholder without
+//       submitting, so tmuxSend() now detects newlines and sends a second
+//       Enter to actually submit. Single-line input still uses the simpler
+//       one-Enter path.
 //
 //  ONE-MINUTE JAVASCRIPT REFRESHER
 //  --------------------------------
@@ -894,33 +902,62 @@ function getTmuxTarget(sessionId) {
 
 // Send text (as keyboard input) to the attached tmux pane, followed by Enter.
 //
-// IMPORTANT FIX: Earlier versions combined text + Enter into a single
-// `send-keys` call. This sometimes caused Claude Code's TUI to receive
-// the Enter mid-paste and leave the text sitting in the input box with
-// nothing happening. Splitting into three steps fixes that:
+// MULTI-STEP DESIGN. Doing this in one shot ("send text + Enter together")
+// historically caused two problems:
 //
-//   1. Send text with `-l` (literal) — avoids tmux misinterpreting special
-//      chars like apostrophes or non-ASCII characters.
-//   2. Sleep 0.3s so Claude Code's TUI finishes absorbing the text.
-//   3. Send Enter as a separate key event so it's unambiguously "submit".
+//   Problem 1 (single-line):
+//     Claude Code's TUI would receive the Enter mid-paste and leave the
+//     text sitting in the input box with nothing happening.
+//   Solution:
+//     Send text with `-l` (literal) → sleep briefly → send Enter separately.
+//
+//   Problem 2 (multi-line):
+//     When the user sends a message that contains newlines (e.g. a paragraph
+//     pasted from Slack), the literal text is interpreted by claude-code as
+//     a paste, and the TUI shows a collapsed "[Pasted text #1 +N lines]"
+//     placeholder. In this paste-mode UI, a single Enter often only confirms
+//     the paste (i.e. closes the placeholder) but does NOT submit the
+//     message — the user (or bot) has to press Enter a second time to
+//     actually send it.
+//   Solution:
+//     Detect newlines in the text. If multiline:
+//       - wait longer (0.8s) for the paste UI to finish settling
+//       - send Enter (closes the paste placeholder)
+//       - wait again (0.3s)
+//       - send Enter a second time (actually submits)
 //
 // After sending, we also record the current time in `lastUserInputAt` so
 // the polling loop knows to suppress permission detection for a few
 // seconds (see the echo-suppression guard in startTmuxPolling).
 function tmuxSend(text) {
   const target = getTmuxTarget(currentTmuxSession);
+  // Newline → claude-code will trigger its "paste" UI flow, which needs
+  // different timing and a second Enter at the end to actually submit.
+  const isMultiline = text.includes('\n');
+
   // 1. Send the text as literal characters (-l ensures special chars like
   //    apostrophes, Korean, etc. are transmitted verbatim without tmux
   //    trying to interpret them).
   execSync(`tmux send-keys -t ${target} -l ${JSON.stringify(text)}`);
+
   // 2. Give Claude Code's TUI a moment to fully receive the text before
-  //    we press Enter. Without this pause, Enter can arrive mid-paste and
-  //    the input gets stuck in the box.
-  execSync(`sleep 0.3`);
-  // 3. Now send Enter as a separate key event so Claude Code treats it
-  //    unambiguously as "submit".
+  //    we press Enter. Multiline text triggers the "[Pasted text #1]"
+  //    UI which needs more time to settle than a single-line message.
+  execSync(`sleep ${isMultiline ? '0.8' : '0.3'}`);
+
+  // 3. Send Enter. For single-line input this submits the message.
+  //    For multi-line input this typically just closes the paste UI.
   execSync(`tmux send-keys -t ${target} Enter`);
-  // 4. Record input time so the polling loop can skip detection while the
+
+  // 4. For multi-line input, the first Enter only closed the paste
+  //    placeholder. We need a second Enter (after a short pause) to
+  //    actually submit the message to Claude Code.
+  if (isMultiline) {
+    execSync(`sleep 0.3`);
+    execSync(`tmux send-keys -t ${target} Enter`);
+  }
+
+  // 5. Record input time so the polling loop can skip detection while the
   //    user's text is still echoed on the tmux screen. Prevents e.g. user
   //    pasting a code snippet with "[Y/n]" from firing a false alarm.
   lastUserInputAt = Date.now();
