@@ -166,6 +166,13 @@ let tmuxStreamTs = null;
 let tmuxLiveMsgTs = null;
 let lastTmuxOutput = "";
 let awaitingPermission = false;
+// Fingerprint (마지막 300자) of the prompt that triggered the most recent
+// permission alert. Used to suppress duplicate alerts for the same on-screen
+// prompt. Cleared implicitly by being overwritten on each new alert; an
+// auto-reset path also nulls this when the prompt disappears entirely.
+// Prevents false-alarm storms when the user's own input briefly redraws
+// the screen and the same prompt re-appears underneath.
+let lastPromptFingerprint = null;
 
 // ─── 5b. INPUT-ECHO SUPPRESSION STATE ───────────────────────────────────────
 // When the user sends text into tmux (via /tmux command, thread reply, or
@@ -242,7 +249,7 @@ const STRONG_PATTERNS = [
   /\[Y\/n\]/i,
   /1\.\s*Yes[^\n]*\n\s*2\.\s*No/i,   // consecutive-line Yes/No list
   /Yes.*No.*\(enter number\)/is,
-  /[❯›]\s*1\.\s*\w/,                 // selector cursor + numbered option + letter
+  /[❯›]\s?1\.\s+(Yes|No|Allow|Deny|Confirm|Cancel)/i,   // cursor + "1." + permission-related keyword (Yes/No/Allow/etc.) — narrowed from the looser "\w" version that fired on any letter after "1." and caused false alarms when the user's own multi-question input was redrawn by claude-code with a "❯" near a "(1)" reference
 ];
 
 // WEAK patterns: claude-code TUI chrome that often appears WITHOUT a real
@@ -439,6 +446,19 @@ async function startTmuxPolling(client) {
     const echoSuppress = sinceUserInput < INPUT_ECHO_SUPPRESS_MS;
 
     if (!awaitingPermission && !echoSuppress && detectPermissionRequest(output)) {
+      // ── DUPLICATE-PROMPT GUARD (fingerprint check) ──
+      // Even after the pattern matches, we may have already alerted the
+      // user for THIS SAME on-screen prompt. That happens when:
+      //   - The user resolved the previous permission in the terminal
+      //     directly (so the pane text didn't visibly change), then sent
+      //     new input that briefly redrew the screen; the original prompt
+      //     reappears underneath and gets re-matched.
+      //   - claude-code redraws the prompt as part of normal TUI behavior.
+      // Take a fingerprint of the last 300 chars and skip if unchanged.
+      const fingerprint = output.slice(-300);
+      if (fingerprint === lastPromptFingerprint) continue;
+      lastPromptFingerprint = fingerprint;
+
       awaitingPermission = true;
       awaitingPermissionSince = Date.now();
       reminderSent = false;     // Fresh prompt → enable reminder again

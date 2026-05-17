@@ -23,6 +23,7 @@ let tmuxStreamTs = null;
 let tmuxLiveMsgTs = null;
 let lastTmuxOutput = "";
 let awaitingPermission = false;
+let lastPromptFingerprint = null;   // 마지막으로 알림 보낸 prompt 화면의 fingerprint
 
 // Timestamp (ms) of the last user→tmux input. For the next ~4 seconds after
 // the user sends text into tmux, the polling loop skips permission detection.
@@ -95,7 +96,7 @@ const STRONG_PATTERNS = [
   /\[Y\/n\]/i,
   /1\.\s*Yes[^\n]*\n\s*2\.\s*No/i,   // consecutive-line Yes/No list
   /Yes.*No.*\(enter number\)/is,
-  /[❯›]\s*1\.\s*\w/,                 // selector cursor + numbered option + letter
+  /[❯›]\s?1\.\s+(Yes|No|Allow|Deny|Confirm|Cancel)/i,   // cursor + 1. + 권한 키워드
 ];
 
 // WEAK patterns: claude-code TUI chrome that often appears WITHOUT a real
@@ -270,6 +271,13 @@ async function startTmuxPolling(client) {
     const echoSuppress = sinceUserInput < INPUT_ECHO_SUPPRESS_MS;
 
     if (!awaitingPermission && !echoSuppress && detectPermissionRequest(output)) {
+      // Fingerprint check: 같은 화면에 대해 두 번 알림 보내지 않음.
+      // 이전 권한 응답 직후 본인 입력으로 화면이 잠시 바뀌었다가 동일 prompt
+      // 가 다시 떴을 때, 또는 봇이 같은 prompt 를 두 번 본 경우 차단.
+      const fingerprint = output.slice(-300);
+      if (fingerprint === lastPromptFingerprint) continue;
+      lastPromptFingerprint = fingerprint;
+
       awaitingPermission = true;
       awaitingPermissionSince = Date.now();
       reminderSent = false;     // Fresh prompt → enable reminder again
