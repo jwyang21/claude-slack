@@ -1,4 +1,6 @@
 # claude-code-slack
+This repository is to explain codes to control Claude Code running in tmux pane via slack app. 
+For the explanation of overall methods to use Claude Code (e.g., installing, re-installing, creating rules and/or skills, etc), refer to [claude-code-setting](https://github.com/jwyang21/claude-code-setting) repository.
 
 ## Main Functions
 - To control a Claude Code agent running in a server's tmux session
